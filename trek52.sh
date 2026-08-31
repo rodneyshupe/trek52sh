@@ -338,7 +338,7 @@ function cursor() {
 function get_char() {
     local ch
     while :; do
-        IFS= read -rsn1 ch || break        # break on EOF to avoid spinning
+        IFS= read -rsn1 ch </dev/tty || break   # break on EOF to avoid spinning
         [[ -z "$ch" || "$ch" == $'\r' || "$ch" == $'\n' ]] || break
     done
     printf '%s' "$ch"
@@ -349,7 +349,7 @@ function get_char() {
 # rather than the stray newline get_char skips.
 function get_any_key() {
     local ch
-    IFS= read -rsn1 ch
+    IFS= read -rsn1 ch </dev/tty
     printf '%s' "$ch"
 }
 
@@ -374,9 +374,9 @@ function get_line_at() {
     local x=$1 y=$2 prompt=$3
     cursor "$x" "$y"
     printf '%s%s' "$prompt" "$clear_line"
-    stty "$SANE_TTY"          # cooked mode so the user sees what they type
-    IFS= read -r LINE_RESULT
-    stty -echo
+    stty "$SANE_TTY" </dev/tty   # cooked mode so the user sees what they type
+    IFS= read -r LINE_RESULT </dev/tty
+    stty -echo </dev/tty
 }
 
 # max / min on integers.
@@ -1452,11 +1452,14 @@ function main() {
     check_screen_size || exit 1
 
     # Save the sane terminal state, then switch to no-echo for single-key input.
-    SANE_TTY=$(stty -g)
-    stty -echo
+    # Operate on /dev/tty (the real terminal) rather than stdin, so terminal
+    # modes are set correctly even when the script was piped in on stdin, e.g.
+    # `cat trek52.sh | bash`.
+    SANE_TTY=$(stty -g </dev/tty)
+    stty -echo </dev/tty
     printf '%s[?25l' "$ESC"   # hide cursor
 
-    trap 'stty "$SANE_TTY"; printf "%s[?25h" "$ESC"; printf "%s" "$clear_screen"; exit 0' EXIT INT TERM
+    trap 'stty "$SANE_TTY" </dev/tty; printf "%s[?25h" "$ESC"; printf "%s" "$clear_screen"; exit 0' EXIT INT TERM
 
     welcome
     while (( exit_game == FALSE )); do

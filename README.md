@@ -135,6 +135,31 @@ chmod +x trek52.sh
 
 You can also run it explicitly with bash: `bash trek52.sh`.
 
+### Run it straight from the web
+
+You don't have to download the script first — you can pipe it into bash
+directly from the repository:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rodneyshupe/trek52sh/main/trek52.sh | bash
+```
+
+To pass flags such as `--colour`, don't add them after `bash` in the pipe —
+they'd be treated as arguments to bash, not the script. Use one of these forms
+instead, which keep your terminal attached to stdin:
+
+```bash
+# Process substitution (bash/zsh): the script's own stdin stays on the terminal
+bash <(curl -fsSL https://raw.githubusercontent.com/rodneyshupe/trek52sh/main/trek52.sh) --colour
+
+# Or forward args through the pipe with bash -s
+curl -fsSL https://raw.githubusercontent.com/rodneyshupe/trek52sh/main/trek52.sh | bash -s -- --colour
+```
+
+As always, piping a script from the internet straight into a shell runs
+whatever that URL serves. Have a look at the source first if you'd rather be
+sure of what you're running.
+
 ## How to play
 
 You command the Starship Enterprise. The galaxy is an 8×8 grid of **quadrants**,
