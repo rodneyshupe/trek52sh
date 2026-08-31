@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 declare -r TITLE="TREK52"
-declare -r VERSION="1.0.0"
+declare -r VERSION="1.0.1"
 declare -r AUTHOR="Rodney Shupe <rodney@shupe.ca>"
 declare -r ABOUT="A version of Star Trek for standard terminals, ported from VT52 BASIC to Bash."
 
