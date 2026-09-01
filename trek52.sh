@@ -765,7 +765,12 @@ function dist() {
     local ey=$(( enterprise_y % 8 )) ex=$(( enterprise_x % 8 ))
     local dy=$(( ey - ${lk_y[$k]} )) dx=$(( ex - ${lk_x[$k]} ))
     local sumsq=$(( dy*dy + dx*dx ))          # exact integer
-    fp_sqrt $(( sumsq * FP ))                  # sqrt of scaled sum -> scaled result
+    local d; d=$(fp_sqrt $(( sumsq * FP )))    # sqrt of scaled sum -> scaled result
+    # Floor at one sector (FP). A zero distance (Klingon rounding onto the
+    # Enterprise's sector) would make callers divide by zero in pwr/d; clamping
+    # keeps point-blank range as maximum damage instead of crashing the math.
+    (( d < FP )) && d=$FP
+    echo "$d"
 }
 
 # Compute a course track through the current quadrant.
