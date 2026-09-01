@@ -117,6 +117,9 @@ version keeps the gameplay identical but modernizes the plumbing:
 - **Optional colour.** A `-c` / `--colour` flag adds status-aware colour to the
   display (see below). Off by default, so the original monochrome look is
   preserved.
+- **Optional sound.** A `-s` / `--sound` flag adds sound effects on macOS,
+  built from the built-in `say` command (see below). Off by default; on systems
+  without `say` it does nothing, so the flag is harmless everywhere.
 
 ## Requirements
 
@@ -130,6 +133,8 @@ version keeps the gameplay identical but modernizes the plumbing:
 chmod +x trek52.sh
 ./trek52.sh              # play in classic monochrome
 ./trek52.sh --colour     # play with colour (see below)
+./trek52.sh --sound      # play with sound effects (macOS; see below)
+./trek52.sh --colour --sound   # both
 ./trek52.sh --help       # usage
 ```
 
@@ -233,6 +238,17 @@ identical.
   subtle bright yellow so they stand out from the rest of the board.
 - **Torpedo track:** a fired torpedo is drawn travelling across the short-range
   scanner as a red `*` (a `+` in monochrome, to avoid confusion with stars).
+
+## Sound mode
+
+Running with `-s` / `--sound` adds sound effects, using macOS's built-in `say`
+command. Off by default; gameplay is identical either way — the audio is pure
+flavour. Cues play on red alert, docking, firing phasers and torpedoes, taking
+a hit, and winning or losing.
+
+Off macOS (no `say`), some cues fall back to the terminal bell so `--sound`
+still gives audible feedback: red alert, torpedoes, hits, and end of game.
+Docking and phasers are silent in that case.
 
 ## Implementation notes
 

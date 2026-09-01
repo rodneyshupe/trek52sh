@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 declare -r TITLE="TREK52"
-declare -r VERSION="1.0.1"
+declare -r VERSION="1.0.2"
 declare -r AUTHOR="Rodney Shupe <rodney@shupe.ca>"
 declare -r ABOUT="A version of Star Trek for standard terminals, ported from VT52 BASIC to Bash."
 
@@ -48,8 +48,13 @@ declare -r DEFAULT_MIN_ROWS=24
 # Colour is off by default so the original monochrome look is preserved.
 declare -r DEFAULT_USE_COLOUR=${FALSE}
 
+# Sound is off by default: it depends on macOS's `say`, and nobody wants a
+# terminal talking unexpectedly. Enable with -s/--sound.
+declare -r DEFAULT_USE_SOUND=${FALSE}
+
 # Arguments (initialized from the defaults; set by parse_arguments).
 declare arg_use_colour=${DEFAULT_USE_COLOUR}
+declare arg_use_sound=${DEFAULT_USE_SOUND}
 
 # ---------------------------------------------------------------------------
 #  Global state
@@ -91,6 +96,13 @@ declare -a trk_y trk_x
 
 # Current alert condition text (needed by the Klingon-attack docking check).
 cond=" GREEN"
+
+# Tracks the (condition + quadrant) the red-alert klaxon last fired for, so the
+# cue sounds on every genuine entry into a hostile quadrant -- including warping
+# from one RED quadrant straight into another -- without re-firing on the many
+# redraws that also call update_condition within the same quadrant. Empty means
+# "no alert has sounded yet".
+prev_alert_key=""
 
 # System-damage indices (mirror the Basic names).
 d_warp=1; d_shields=2; d_phasers=3; d_torpedoes=4; d_sr_scan=5; d_lr_scan=6; d_computer=7
@@ -150,6 +162,7 @@ USAGE:
 
 FLAGS:
     -c, --colour     Enable coloured display (damage report, map, status)
+    -s, --sound      Enable sound effects (macOS 'say'; ignored if unavailable)
     -h, --help       Prints help information
     -V, --version    Prints version information
 
@@ -173,6 +186,10 @@ function parse_arguments() {
         ;;
       -c|--color|--colour)
         arg_use_colour=${TRUE}
+        shift # past argument
+        ;;
+      -s|--sound)
+        arg_use_sound=${TRUE}
         shift # past argument
         ;;
       --)
@@ -199,6 +216,195 @@ function cwrap() {
     if (( USE_COLOUR == TRUE )); then printf '%s%s%s' "$1" "$2" "$C_RESET"
     else printf '%s' "$2"
     fi
+}
+
+# ---------------------------------------------------------------------------
+#  Sound support (enabled with -s / --sound)
+# ---------------------------------------------------------------------------
+# Best-effort, optional flavour. Speech uses macOS's `say`; on systems without
+# it it uses a no-op stub so every call is harmless. USE_SOUND (a TRUE/FALSE
+# boolean set from arg_use_sound in main) gates it, and HAVE_SAY records whether
+# `say` actually exists, so speak() can no-op cleanly on non-Macs even if the
+# flag is on. Speech is spawned in the background so it never blocks the game
+# loop; the PIDs are tracked so the exit trap and new sounds can silence any
+# speech still playing.
+#
+# Some cues speak a line (red alert, torpedo, win, lose); others are pure sound
+# effects made with `say` itself -- Zarvox plus pitch/rate directives and
+# onomatopoeia ("pew pew", "boom") rather than a sentence -- so the whole sound
+# system stays on the single `say` dependency, no audio files or afplay needed.
+USE_SOUND=${DEFAULT_USE_SOUND}
+HAVE_SAY=${FALSE}
+command -v say >/dev/null 2>&1 && HAVE_SAY=${TRUE}
+# No-op stub when `say` is absent, so bare `say ...` calls never error.
+if (( HAVE_SAY == FALSE )); then function say() { :; }; fi
+
+# PIDs of backgrounded speech jobs still (potentially) playing.
+declare -a SOUND_PIDS=()
+
+# Epoch second until which a "protected" cue (the red-alert klaxon) is playing
+# and must not be interrupted by an ordinary cue. On warping into a hostile
+# quadrant, update_condition starts the klaxon and then klingon_attack fires the
+# hit sound in the same turn; without this guard the hit's sound_stop would kill
+# the klaxon before it was heard. 0 means nothing is protected.
+sound_protect_until=0
+
+# Track a just-backgrounded speech job so sound_stop can reach it later.
+function _sound_track() { SOUND_PIDS+=("$1"); }
+
+# Silence any speech still playing and forget the finished jobs. Safe to call
+# when nothing is playing. Errors from already-exited PIDs are discarded.
+# Pass "force" as $1 to override an active protection window (used on exit).
+function sound_stop() {
+    # Respect a protected cue (e.g. the red alert) unless forced: an ordinary
+    # cue that lands during the protection window leaves the protected one alone.
+    if [[ "${1:-}" != "force" ]] && (( sound_protect_until > 0 )); then
+        (( $(date +%s) < sound_protect_until )) && return 0
+        sound_protect_until=0   # window elapsed; clear it
+    fi
+    # Guard the expansion: under `set -u`, "${arr[@]}" on an empty array is an
+    # unbound-variable error on bash 3.2, and sound_stop runs from the exit trap
+    # on every quit (sound or not), so this must never fail.
+    (( ${#SOUND_PIDS[@]} == 0 )) && return 0
+    local pid
+    for pid in "${SOUND_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null
+    done
+    SOUND_PIDS=()
+}
+
+# speak VOICE TEXT -> say TEXT in the background using VOICE, when sound is on
+# and `say` is available; otherwise a no-op. Centralizes the flag/availability
+# check so the sound_* functions below don't repeat it.
+function speak() {
+    (( USE_SOUND == TRUE && HAVE_SAY == TRUE )) || return 0
+    say -v "$1" "$2" &
+    _sound_track $!
+}
+
+# sfx VOICE TEXT -> like speak, but it interrupts any cue still playing first
+# (sound_stop), so the short sound-effect cues don't pile up during rapid fire
+# (phasers, hits). TEXT is onomatopoeia with pitch/rate directives, not a spoken
+# sentence -- a `say`-made sound effect. VOICE is explicit so each cue can pick
+# whichever synth voice sounds most like the effect (the "novelty" voices such
+# as Boing, Bells, Cellos, Wobble, Bad News make better noises than a normal
+# reading voice). Run `say -v '?'` to list the voices installed on your Mac.
+function sfx() {
+    (( USE_SOUND == TRUE && HAVE_SAY == TRUE )) || return 0
+    sound_stop
+    say -v "$1" "$2" &
+    _sound_track $!
+}
+
+# have_bell_fallback -> TRUE when sound is on but `say` is unavailable, so a cue
+# should fall back to the terminal bell instead of speech. On a Mac with `say`,
+# this is FALSE and the richer say-based cues are used instead.
+function have_bell_fallback() {
+    (( USE_SOUND == TRUE && HAVE_SAY == FALSE ))
+}
+
+# bell N [GAP] -> ring the terminal bell N times, GAP seconds apart (default
+# 0.25). Runs in the background and is tracked/interruptible like the other
+# cues, so a multi-beep pattern never blocks the game loop. A single beep needs
+# no gap; multiple beeps space themselves out.
+function bell() {
+    local count=${1:-1} gap=${2:-0.25}
+    (
+        local i
+        for (( i=0; i<count; i++ )); do
+            printf '\a'
+            (( i < count-1 )) && sleep "$gap"
+        done
+    ) &
+    _sound_track $!
+}
+
+# --- Individual sound cues ---------------------------------------------------
+# Spoken cues (speak): red alert, torpedo away, victory, defeat.
+# Sound-effect cues (sfx): docking, phasers, Klingon destroyed, taking a hit --
+# `say` making a noise rather than talking.
+#
+# These are impressions, not recordings: `say` is a speech synth, so it can only
+# approximate an explosion or a phaser, not reproduce them. Tune them freely --
+# the first arg is the VOICE, and in the text [[pbas N]] sets pitch (lower =
+# deeper) and [[rate N]] the speed. Good voices to try per effect are noted
+# below; swap the voice and/or the onomatopoeia until it sounds right to you.
+
+function sound_red_alert() {
+    # Bell fallback when `say` is unavailable: three spaced beeps as a klaxon.
+    if have_bell_fallback; then
+        sound_stop
+        sound_protect_until=$(( $(date +%s) + 1 ))   # ~0.5s of beeps; guard 1s
+        bell 3 0.25
+        return 0
+    fi
+    (( USE_SOUND == TRUE && HAVE_SAY == TRUE )) || return 0
+    sound_stop
+    # Protect this cue for its duration so the Klingon hit that lands in the same
+    # turn (on warping into a hostile quadrant) doesn't cut the klaxon off. The
+    # klaxon runs ~3.5s and the spoken tail finishes ~2.5s in, so guard 4s.
+    sound_protect_until=$(( $(date +%s) + 4 ))
+    # Klaxon: a pitch that climbs (pbas stepped up through one "ee" tone) then
+    # cuts off, repeated 4x with a "." gap so each rise restarts low -- the TOS
+    # red-alert sweep. Runs ~5s; the spoken tail is delayed to land after it.
+    local ramp="[[pbas 40]] ee [[pbas 55]] ee [[pbas 70]] ee [[pbas 85]] ee [[pbas 99]] eee"
+    say -v Zarvox "$ramp . $ramp . $ramp" &
+    _sound_track $!
+    # Spoken tail in a natural male voice -- the captain calling red alert --
+    # rather than the electronic Zarvox that makes the klaxon. (Try: Daniel, Reed.)
+    ( sleep 1.5; say -v Reed "[[rate 180]] Red Alert." ) &
+    _sound_track $!
+}
+
+# Docking: a bosun's whistle -- the two-note piped call that precedes a ship's
+# announcement. Cellos is tonal, so a "twee" that glides up in pitch and holds
+# high reads as the rising whistle. (Raise/lower the pbas steps to shift it.)
+function sound_docking() {
+    sfx Cellos "[[volm 0.3]][[rate 240]][[pbas 65]]twee[[pbas 90]]weee[[pbas 99]]eee"
+}
+
+# Phasers: an airy energy-beam whoosh. Whisper is breathy (no vocal tone), so a
+# "shhh" that swells up in pitch then falls reads as a phaser blast rather than
+# speech. (Try: Whisper; raise/lower the pbas steps to shift the sweep.)
+function sound_phasers() {
+    sfx Whisper "[[rate 220]][[pbas 40]]shhh[[pbas 65]]SHHH[[pbas 90]]SHHH[[pbas 65]]shhh[[pbas 40]]shh"
+}
+
+# Taking a hit: a short console-explosion blast -- a hard "kbwaa" crack onset
+# dropping to a low "oom", approximating a bridge-console blowout. Bahh gives a
+# broad, noisy body; the leading k/b consonants sharpen the attack. (~0.46s.)
+function sound_hit() {
+    if have_bell_fallback; then bell 1; return 0; fi
+    sfx Bahh "[[rate 300]][[pbas 60]]kbwaa[[pbas 25]]oom"
+}
+
+# Torpedo: a sharp high spike that tails off -- a "bee" onset at max pitch, then
+# a stepped descent through a long vowel for a slow fade. Cellos is tonal, which
+# reads as an electronic launch pulse. (Raise/lower the pbas steps to shift it.)
+function sound_torpedo() {
+    if have_bell_fallback; then
+        # Normally the launch pulse is replaced by a beep on each animation step
+        # (see animate_torpedo). But when the SR scanner is damaged the map is
+        # blank and there's no animation, so emit a single launch beep instead
+        # so the shot still makes a sound.
+        (( damage[d_sr_scan] )) && bell 1
+        return 0
+    fi
+    sfx Cellos "[[rate 300]][[pbas 99]]bee[[pbas 80]]eee[[pbas 62]]eee[[pbas 48]]eee[[pbas 40]]ooo"
+}
+
+function sound_victory() {
+    # Bell fallback: two quick beeps, an upbeat "all clear".
+    if have_bell_fallback; then sound_stop; bell 2 0.15; return 0; fi
+    sound_stop
+    speak Samantha "[[rate 190]] The Federation has been saved."
+}
+
+function sound_defeat() {
+    # Bell fallback: three slow beeps, a somber toll.
+    if have_bell_fallback; then sound_stop; bell 3 0.5; return 0; fi
+    sound_stop
+    speak Samantha "[[pbas 40]][[rate 180]] The Enterprise is lost."
 }
 
 # ---------------------------------------------------------------------------
@@ -749,6 +955,9 @@ function initialize_game() {
     stardates=30; shields=0; energy=3000; torpedoes=10
     local i
     for (( i=1; i<=7; i++ )); do damage[$i]=0; done
+    # Re-arm the red-alert cue: a fresh game must sound the klaxon on its first
+    # hostile quadrant even if it happens to match the last game's alert key.
+    prev_alert_key=""
     initialize_quadrant
     exit_game=${FALSE}
 }
@@ -833,6 +1042,10 @@ function change_sector() {
 # ---------------------------------------------------------------------------
 
 function update_condition() {
+    # Remember the condition before we recompute it, so we can play a sound cue
+    # only on an actual transition (this runs on every refresh, so firing
+    # unconditionally would spam the red-alert klaxon).
+    local prev_cond=$cond
     local eq_y=$(( enterprise_y / 8 )) eq_x=$(( enterprise_x / 8 ))
     if (( ${galaxy[(($eq_y)*8+($eq_x))]} - 1000 >= 100 )); then cond='   RED'; else cond=' GREEN'; fi
 
@@ -852,6 +1065,27 @@ function update_condition() {
         display_message "Shields lowered for docking."
     fi
     cursor 48 10; printf '%s' "$(colour_for_condition "$cond")"
+
+    # Sound cues. The red alert must fire on every genuine entry into a hostile
+    # quadrant -- including warping from one RED quadrant straight into another,
+    # where the condition string alone stays "RED" and so wouldn't register as a
+    # change. Key it on condition + quadrant instead: fire when RED and that key
+    # differs from the last alert we sounded. Docking is per-quadrant too, but a
+    # plain condition change is enough for it (you can't dock twice in a row
+    # without leaving). Redraws within the same quadrant keep the same key, so
+    # they don't re-fire.
+    local alert_key="$cond:$eq_y:$eq_x"
+    case "$cond" in
+        *RED*)
+            if [[ "$alert_key" != "$prev_alert_key" ]]; then
+                sound_red_alert
+            fi
+            ;;
+        *DOCKED*)
+            [[ "$cond" != "$prev_cond" ]] && sound_docking
+            ;;
+    esac
+    prev_alert_key="$alert_key"
 }
 
 # Return the colour code matching a condition string (GREEN/RED/DOCKED).
@@ -916,6 +1150,7 @@ function klingon_attack() {
         display_message "$hit unit hits on Enterprise from Klingons!"
     fi
     if (( cnt > 0 )); then
+        sound_hit
         # int(rnd * shields) < hit
         if (( $(rnd) * shields / FP < hit )); then wreak_damage "$shields"; fi
         shields=$(( shields - hit )); update_shields
@@ -945,6 +1180,7 @@ function phasers() {
     fi
     energy=$(( energy - phasers_units )); update_energy
     clear_messages
+    sound_phasers
     local qi pwr d hit
     for (( qi=1; qi<=3; qi++ )); do
         pwr=${lk_pwr[$qi]}
@@ -975,10 +1211,15 @@ function animate_torpedo() {
     (( damage[d_sr_scan] )) && return
     if (( USE_COLOUR == TRUE )); then char="${C_RED}${TORP_CHAR_COLOUR}${C_RESET}"
     else char="$TORP_CHAR_MONO"; fi
+    # In bell-fallback mode (sound on, no `say`) beep once per step so the
+    # torpedo is heard travelling; each beep rides the per-step pause below.
+    local beep_step=${FALSE}
+    have_bell_fallback && beep_step=${TRUE}
     for (( ti=1; ti<=last; ti++ )); do
         r=$(fp_round "${trk_y[$ti]}"); c=$(fp_round "${trk_x[$ti]}")
         # Draw the torpedo at this sector.
         cursor $(( c * 3 + 1 )) $(( r + 1 )); printf '%s' "$char"
+        (( beep_step == TRUE )) && printf '\a'
         sleep 0.25 2>/dev/null
         # Erase: restore the sector's true contents.
         update_sector "$r" "$c"
@@ -1006,6 +1247,7 @@ function torpedoes_cmd() {
     fi
     qc=$qc_fp
     torpedoes=$(( torpedoes - 1 )); update_torpedoes
+    sound_torpedo
 
     local qi; course_track "$qc" "$FP"; qi=$COURSE_RESULT   # warp factor 1 == FP
     local last
@@ -1363,6 +1605,7 @@ function play_game() {
 
     # End-of-game messages.
     if (( klingons == 0 )); then
+        sound_victory
         if (( energy + shields >= 0 )); then
             display_message "The Federation has been saved!"
             display_message "You are promoted to Admiral... until you"
@@ -1373,6 +1616,7 @@ function play_game() {
             display_message "You are promoted to Admiral posthumously."
         fi
     else
+        sound_defeat
         if (( shields < 0 )); then
             display_message "The Enterprise has been destroyed!"
             display_message "The Federation will be conquered."
@@ -1452,6 +1696,7 @@ function check_screen_size() {
 function main() {
     # Apply parsed arguments to the runtime globals.
     USE_COLOUR=${arg_use_colour}
+    USE_SOUND=${arg_use_sound}
 
     # Make sure the window is big enough before we touch the terminal or draw.
     check_screen_size || exit 1
@@ -1464,7 +1709,7 @@ function main() {
     stty -echo </dev/tty
     printf '%s[?25l' "$ESC"   # hide cursor
 
-    trap 'stty "$SANE_TTY" </dev/tty; printf "%s[?25h" "$ESC"; printf "%s" "$clear_screen"; exit 0' EXIT INT TERM
+    trap 'sound_stop force; stty "$SANE_TTY" </dev/tty; printf "%s[?25h" "$ESC"; printf "%s" "$clear_screen"; exit 0' EXIT INT TERM
 
     welcome
     while (( exit_game == FALSE )); do
