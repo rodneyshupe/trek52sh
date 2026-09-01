@@ -143,6 +143,7 @@ C_YELLOW="${ESC}[33m"
 C_RED="${ESC}[31m"
 C_CYAN="${ESC}[96m"    # bright cyan: high-contrast for Enterprise/Starbase
 C_MSG="${ESC}[93m"     # bright yellow: subtle highlight for status messages
+C_PROMPT="${ESC}[36m"  # cyan: input prompts, distinct from yellow messages
 
 # Torpedo animation: character shown as the torpedo travels the short-range map.
 # In colour mode a red '*' reads as a projectile; in monochrome a '*' would be
@@ -781,18 +782,22 @@ function refresh_screen() {
 
 function display_message() {
     local msg=$1
+    # Optional colour override (defaults to the yellow message tint). Lets a
+    # prompt drawn in the message area -- e.g. abandon's exit confirmation --
+    # use the cyan prompt colour instead while keeping the paging/positioning.
+    local colour=${2:-$C_MSG}
     if (( command_y + message_count + 1 >= 23 )); then
         cursor "$command_x" $(( message_count + command_y + 1 ))
-        (( USE_COLOUR == TRUE )) && printf '%s%s' "$C_RESET" "$C_MSG"
+        (( USE_COLOUR == TRUE )) && printf '%s%s' "$C_RESET" "$colour"
         printf -- '-- More -- (hit any key)'
         get_any_key >/dev/null
         clear_messages
     fi
     cursor "$command_x" $(( message_count + command_y + 1 ))
-    # In colour mode, reset attributes then tint the message in bright yellow.
-    # The explicit colour both highlights the message subtly and guarantees it
-    # is visible regardless of any foreground colour left active by a prior draw.
-    if (( USE_COLOUR == TRUE )); then printf '%s%s%s%s' "$C_RESET" "$C_MSG" "$msg" "$C_RESET"
+    # In colour mode, reset attributes then tint the message. The explicit colour
+    # both highlights the text and guarantees it is visible regardless of any
+    # foreground colour left active by a prior draw.
+    if (( USE_COLOUR == TRUE )); then printf '%s%s%s%s' "$C_RESET" "$colour" "$msg" "$C_RESET"
     else printf '%s' "$msg"; fi
     message_count=$(( message_count + 1 ))
 }
@@ -1340,7 +1345,7 @@ function lr_scan() {
 
 function abandon() {
     printf 'Abandon Ship'
-    display_message "Do you want to exit the game? "
+    display_message "Do you want to exit the game? " "$C_PROMPT"
     local a
     a=$(upper "$(get_char)")
     if [[ "$a" == "Y" ]]; then printf '%s' "$clear_screen"; exit_game=${TRUE}; return 1; fi
@@ -1635,7 +1640,7 @@ function offer_replay() {
     local cmd
     while :; do
         cursor "$command_x" "$command_y"
-        printf 'Would you like to play again? %s' "$clear_line"
+        printf '%s%s' "$(cwrap "$C_PROMPT" 'Would you like to play again? ')" "$clear_line"
         cmd=$(upper "$(get_char)")
         [[ "$cmd" == "Y" ]] && return 0
         [[ "$cmd" == "N" ]] && return 1
